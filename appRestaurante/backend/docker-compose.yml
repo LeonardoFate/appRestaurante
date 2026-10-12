@@ -1,0 +1,29 @@
+# Base de datos de desarrollo y pruebas: PostgreSQL con el esquema v2 aplicado.
+#   docker compose up -d        (primera vez aplica el esquema y crea el usuario api_login)
+#   docker compose down -v      (borra los datos para empezar de cero)
+name: restaurantes-dev
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: restaurantes
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      # Se ejecutan en orden alfabetico solo cuando el volumen esta vacio.
+      - ../database/schema_restaurantes_v2.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./dev/02-roles-dev.sql:/docker-entrypoint-initdb.d/02-roles-dev.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d restaurantes"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    networks:
+      - dev
+
+networks:
+  dev:
+    name: restaurantes-dev
