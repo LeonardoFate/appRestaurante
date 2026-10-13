@@ -49,12 +49,14 @@ class ArchitectureTest {
             .allowEmptyShould(true);
 
     /**
-     * El pool de conexiones solo lo usan {@code TenantTransaction} y las funciones de login (que corren antes de conocer
-     * el tenant). Todo lo demas accede a la base mediante la unidad de trabajo del tenant.
+     * El pool de conexiones solo lo usan {@code TenantTransaction}, las funciones de login (que corren antes de conocer
+     * el tenant) y el relay del outbox y el worker de trabajos (que recorren varios restaurantes con su propio
+     * datasource de privilegios minimos). Todo lo demas accede a la base mediante la unidad de trabajo del tenant.
      */
     @ArchTest
-    static final ArchRule soloTenantTransactionYElLoginUsanElPool = noClasses()
-            .that().resideOutsideOfPackages("com.restaurantes.shared.tenancy..", "com.restaurantes.auth.internal..")
+    static final ArchRule soloLosAdaptadoresDeInfraestructuraUsanElPool = noClasses()
+            .that().resideOutsideOfPackages("com.restaurantes.shared.tenancy..", "com.restaurantes.auth.internal..",
+                    "com.restaurantes.shared.events..", "com.restaurantes.shared.jobs..")
             .should().dependOnClassesThat().resideInAPackage("io.agroal..")
             .allowEmptyShould(true);
 

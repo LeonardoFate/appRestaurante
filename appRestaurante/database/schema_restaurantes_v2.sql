@@ -10,9 +10,13 @@
 --   * Los roles se crean sin LOGIN ni clave. Operaciones debe crear los usuarios
 --     de conexion y asignarles membresia, por ejemplo:
 --       CREATE ROLE api_login LOGIN PASSWORD '...' IN ROLE app_backend;
+--       CREATE ROLE sched_login LOGIN PASSWORD '...' BYPASSRLS IN ROLE app_scheduler;
+--     OJO: BYPASSRLS (y LOGIN) son atributos del rol y NO se heredan por membresia. El login del
+--     scheduler y el del reporteo necesitan BYPASSRLS propio; con solo "IN ROLE app_scheduler"
+--     RLS se les seguiria aplicando.
 --   * PgBouncer en modo "transaction" y SIEMPRE SET LOCAL app.tenant_id (nunca SET).
 --
--- ESTADO: validado en PostgreSQL 15.19 y 16 con tests_schema_v2.sql (86 comprobaciones),
+-- ESTADO: validado en PostgreSQL 15.19 y 16 con tests_schema_v2.sql (101 comprobaciones),
 -- con PgBouncer 1.26 en modo transaction, con pruebas de concurrencia (pgbench) y con
 -- 500k pedidos. Resultados y reglas de uso en pruebas_resultados.md.
 --
@@ -821,6 +825,12 @@ create index ix_comprobantes_pedido on comprobantes (tenant_id, pedido_id);
 create index ix_comprobantes_pendientes
   on comprobantes (proximo_intento_en)
   where estado_sri in ('generado','firmado','enviado');
+-- Un pedido tiene como maximo una factura vigente (el reintento de un evento no puede duplicarla).
+create unique index ux_comprobante_factura_pedido
+  on comprobantes (tenant_id, pedido_id) where tipo = '01' and estado_sri <> 'anulado';
+-- Una factura tiene como maximo una nota de credito vigente (una devolucion total no se puede acreditar dos veces).
+create unique index ux_comprobante_nota_credito_factura
+  on comprobantes (tenant_id, comprobante_modificado_id) where tipo = '04' and estado_sri <> 'anulado';
 
 create table comprobante_detalles (
   id                uuid primary key default uuid_v7(),
@@ -878,6 +888,7 @@ create table outbox (
   publicado_en     timestamptz,
   intentos         integer not null default 0 check (intentos >= 0),
   ultimo_error     text,
+  proximo_intento_en timestamptz not null default now(),   -- reintento con espera creciente
   primary key (event_id, creado_en)
 ) partition by range (creado_en);
 create index ix_outbox_pendientes on outbox (creado_en) where publicado_en is null;
@@ -996,6 +1007,40 @@ create table notificaciones (
   creado_en     timestamptz not null default now()
 );
 create index ix_notificaciones_pendientes on notificaciones (creado_en) where estado = 'pendiente';
+
+-- Cola de trabajos (ADR-015). Se encola EN LA MISMA transaccion del cambio de negocio. Un worker reclama
+-- trabajos con FOR UPDATE SKIP LOCKED (varias instancias sin duplicar), los ejecuta dentro del contexto de su
+-- tenant y los marca como completados en esa misma transaccion. 'fallido' hace de cola de trabajos muertos
+-- (dead-letter): nunca se descarta un trabajo en silencio.
+--   * bloqueado_hasta / bloqueado_por = "lease": si el worker muere, otro lo reclama al vencer.
+--   * completar exige seguir siendo el dueno del lease (evita que dos workers completen el mismo trabajo).
+--   * clave_unica = idempotencia del encolado.
+-- Los completados se acumulan: pendiente una purga por antiguedad (ver Backlog).
+create table jobs (
+  id                  uuid primary key default uuid_v7(),
+  tenant_id           uuid not null references tenants (id),
+  cola                text not null,
+  tipo                text not null,
+  payload             jsonb not null default '{}'::jsonb,
+  clave_unica         text,
+  estado              text not null default 'pendiente'
+                        check (estado in ('pendiente','en_proceso','completado','fallido')),
+  intentos            integer not null default 0 check (intentos >= 0),
+  max_intentos        integer not null default 5 check (max_intentos > 0),
+  proximo_intento_en  timestamptz not null default now(),
+  bloqueado_hasta     timestamptz,
+  bloqueado_por       text,
+  ultimo_error        text,
+  creado_en           timestamptz not null default now(),
+  actualizado_en      timestamptz not null default now(),
+  completado_en       timestamptz,
+  check (estado <> 'en_proceso' or (bloqueado_hasta is not null and bloqueado_por is not null)),
+  check (estado <> 'completado' or completado_en is not null)
+);
+create unique index ux_jobs_clave on jobs (tenant_id, cola, clave_unica) where clave_unica is not null;
+create index ix_jobs_pendientes on jobs (proximo_intento_en) where estado = 'pendiente';
+create index ix_jobs_en_proceso on jobs (bloqueado_hasta) where estado = 'en_proceso';
+create index ix_jobs_fallidos on jobs (tenant_id, creado_en) where estado = 'fallido';
 
 -- -----------------------------------------------------------------------------
 -- 14. Configuracion por tenant
@@ -1121,23 +1166,32 @@ begin
 end $$;
 
 -- La suma de pagos activos de un pedido no puede superar su total.
+-- La suma COBRADA NETA de un pedido (lo cobrado menos lo ya reembolsado) no puede superar su total. Un pago
+-- reembolsado parcialmente solo cuenta por la parte que sigue cobrada; asi, tras reembolsar se puede volver a cobrar.
 create or replace function app.validar_suma_pagos() returns trigger
 language plpgsql as $$
 declare
-  v_total numeric(12,2);
-  v_otros numeric(12,2);
+  v_total  numeric(12,2);
+  v_otros  numeric(12,2);
+  v_propio numeric(12,2);
 begin
   if new.estado in ('rechazado','reembolsado') then
     return new;
   end if;
   select total into v_total
     from pedidos where tenant_id = new.tenant_id and id = new.pedido_id for update;
-  select coalesce(sum(monto), 0) into v_otros
-    from pagos
-   where tenant_id = new.tenant_id and pedido_id = new.pedido_id and id <> new.id
-     and estado in ('pendiente','autorizado','capturado','reembolsado_parcial');
-  if v_otros + new.monto > v_total then
-    raise exception 'La suma de pagos (%) excede el total del pedido (%)', v_otros + new.monto, v_total
+  select coalesce(sum(p.monto - coalesce((select sum(r.monto) from reembolsos r
+                                           where r.tenant_id = p.tenant_id and r.pago_id = p.id
+                                             and r.estado in ('pendiente','completado')), 0)), 0)
+    into v_otros
+    from pagos p
+   where p.tenant_id = new.tenant_id and p.pedido_id = new.pedido_id and p.id <> new.id
+     and p.estado in ('pendiente','autorizado','capturado','reembolsado_parcial');
+  v_propio := new.monto - coalesce((select sum(r.monto) from reembolsos r
+                                     where r.tenant_id = new.tenant_id and r.pago_id = new.id
+                                       and r.estado in ('pendiente','completado')), 0);
+  if v_otros + v_propio > v_total then
+    raise exception 'La suma de pagos (%) excede el total del pedido (%)', v_otros + v_propio, v_total
       using errcode = '23514', constraint = 'pagos_suma_excede_total';
   end if;
   return new;
@@ -1462,7 +1516,10 @@ revoke truncate on all tables in schema public from app_backend;
 
 -- Scheduler / relay: recorre varios tenants con acceso minimo.
 grant select on outbox, comprobantes, certificados_firma, dispositivos, notificaciones to app_scheduler;
-grant update (publicado_en, intentos, ultimo_error) on outbox to app_scheduler;
+grant update (publicado_en, intentos, ultimo_error, proximo_intento_en) on outbox to app_scheduler;
+-- Worker de la cola de trabajos: reclama y reprograma trabajos de todos los tenants (BYPASSRLS), sin ver nada mas.
+grant select on jobs to app_scheduler;
+grant update (estado, intentos, proximo_intento_en, bloqueado_hasta, bloqueado_por, ultimo_error) on jobs to app_scheduler;
 grant update (estado) on certificados_firma to app_scheduler;
 grant update (estado, intentos, enviado_en) on notificaciones to app_scheduler;
 

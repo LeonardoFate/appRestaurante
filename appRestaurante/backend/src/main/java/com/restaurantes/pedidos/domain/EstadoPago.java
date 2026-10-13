@@ -20,6 +20,14 @@ public enum EstadoPago {
         return valor;
     }
 
+    /**
+     * No hay dinero cobrado vigente: nunca se cobro, o se devolvio todo. Solo entonces se puede cancelar el pedido o anular
+     * un item sin tener que devolver dinero antes.
+     */
+    public boolean sinDineroCobrado() {
+        return this == SIN_PAGO || this == REEMBOLSADO;
+    }
+
     public static EstadoPago desde(String valor) {
         return Arrays.stream(values())
                 .filter(e -> e.valor.equals(valor))

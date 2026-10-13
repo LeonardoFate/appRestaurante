@@ -25,4 +25,38 @@ public interface PedidosApi {
 
     /** Lo invoca {@code pagos} cuando cambia lo cobrado. {@code pedidos} decide si la transicion es valida. */
     void actualizarEstadoPago(UUID pedidoId, EstadoPago nuevoEstado);
+
+    /**
+     * Confirma el pedido (creado -> confirmado) y publica {@code PedidoConfirmado}, que hace que cocina envie los items
+     * a sus estaciones. Idempotente: si ya estaba confirmado (o mas adelante) no hace nada.
+     *
+     * @param usuarioId quien lo confirma (para el historial)
+     */
+    PedidoVista confirmar(UUID pedidoId, UUID usuarioId);
+
+    /**
+     * Cancela el pedido con un motivo y publica {@code PedidoCancelado}. Solo antes de entregar y solo si no hay cobros:
+     * con cobros corresponde una devolucion (aun no disponible). Idempotente si ya estaba cancelado.
+     */
+    PedidoVista cancelar(UUID pedidoId, String motivo, UUID usuarioId);
+
+    /**
+     * Lo invoca {@code pagos} tras reembolsar dinero. Si el pedido ya se entrego (o cerro), pasa a {@code devuelto_parcial}
+     * o {@code devuelto_total}; antes de entregar solo cambia su estado de cobro y el estado del pedido no se toca.
+     * Idempotente y sin retrocesos ({@code devuelto_total} no vuelve a parcial).
+     *
+     * @param total   {@code true} si tras el reembolso ya no queda nada cobrado
+     * @param motivo  obligatorio: queda en el historial del pedido
+     * @param usuarioId quien autorizo la devolucion
+     */
+    void registrarDevolucion(UUID pedidoId, boolean total, String motivo, UUID usuarioId);
+
+    /**
+     * Lo invoca {@code cocina} tras cambiar el estado de uno o mas items: recalcula los totales con los items vigentes,
+     * cancela el pedido si ya no queda ninguno (y no hay cobros), avanza el estado del pedido segun sus items y lo cierra
+     * si queda entregado y pagado. El estado nunca retrocede.
+     *
+     * @param usuarioId quien origino el cambio; null si lo origino un proceso del sistema (queda como origen "sistema")
+     */
+    void sincronizarConItems(UUID pedidoId, UUID usuarioId);
 }

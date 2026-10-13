@@ -2,7 +2,9 @@ package com.restaurantes.pedidos.internal;
 
 import com.restaurantes.pedidos.api.PedidoVista;
 import com.restaurantes.pedidos.domain.CanalPedido;
+import com.restaurantes.pedidos.domain.EstadoCocina;
 import com.restaurantes.pedidos.domain.EstadoPago;
+import com.restaurantes.pedidos.domain.EstadoPedido;
 import com.restaurantes.pedidos.domain.LineaPedido;
 import com.restaurantes.pedidos.domain.Totales;
 import com.restaurantes.shared.tenancy.TenantTransaction;
@@ -100,15 +102,7 @@ class PedidoRepository {
                 }
                 ps.executeBatch();
             }
-            try (PreparedStatement ps = c.prepareStatement("""
-                    insert into pedido_historial(tenant_id, pedido_id, estado_anterior, estado_nuevo, usuario_id, origen)
-                    values (?, ?, null, 'creado', ?, 'api')
-                    """)) {
-                ps.setObject(1, tenant);
-                ps.setObject(2, id);
-                ps.setObject(3, usuarioId);
-                ps.executeUpdate();
-            }
+            registrarHistorial(id, null, EstadoPedido.CREADO, usuarioId, null, "api");
         } catch (SQLException e) {
             throw new TenantTransactionException("No se pudo guardar el pedido", e);
         }
@@ -120,7 +114,8 @@ class PedidoRepository {
         try {
             PedidoVista cabecera;
             String sql = """
-                    select id, numero, canal, estado, estado_pago, subtotal, descuento, iva, propina, costo_envio, total
+                    select id, sucursal_id, numero, canal, estado, estado_pago, subtotal, descuento, iva, propina,
+                           costo_envio, total
                       from pedidos where id = ?
                     """ + (bloquear ? " for update" : "");
             try (PreparedStatement ps = c.prepareStatement(sql)) {
@@ -136,6 +131,7 @@ class PedidoRepository {
                     boolean sinNumero = rs.wasNull();   // debe leerse justo despues de la columna
                     cabecera = new PedidoVista(
                             rs.getObject("id", UUID.class),
+                            rs.getObject("sucursal_id", UUID.class),
                             sinNumero ? null : numero,
                             CanalPedido.desde(rs.getString("canal")),
                             rs.getString("estado"),
@@ -144,28 +140,113 @@ class PedidoRepository {
                 }
             }
             List<PedidoVista.Linea> lineas = new ArrayList<>();
-            try (PreparedStatement ps = c.prepareStatement("""
-                    select id, producto_id, nombre, precio_unitario, tarifa_iva, cantidad, nota
-                      from pedido_items where pedido_id = ? order by creado_en, id
-                    """)) {
-                ps.setObject(1, id);
-                try (ResultSet rs = ps.executeQuery()) {
-                    while (rs.next()) {
-                        lineas.add(new PedidoVista.Linea(
-                                rs.getObject("id", UUID.class),
-                                rs.getObject("producto_id", UUID.class),
-                                rs.getString("nombre"),
-                                rs.getBigDecimal("precio_unitario"),
-                                rs.getBigDecimal("tarifa_iva"),
-                                rs.getBigDecimal("cantidad"),
-                                rs.getString("nota")));
-                    }
-                }
+            for (LineaPedido l : lineasVigentes(id)) {
+                lineas.add(new PedidoVista.Linea(l.id(), l.productoId(), l.nombre(), l.precioUnitario(), l.porcentajeIva(),
+                        l.codigoIvaSri(), l.cantidad(), l.nota(), l.subtotal(), l.iva()));
             }
-            return Optional.of(new PedidoVista(cabecera.id(), cabecera.numero(), cabecera.canal(), cabecera.estado(),
-                    cabecera.estadoPago(), cabecera.totales(), lineas, false));
+            return Optional.of(new PedidoVista(cabecera.id(), cabecera.sucursalId(), cabecera.numero(), cabecera.canal(),
+                    cabecera.estado(), cabecera.estadoPago(), cabecera.totales(), lineas, false));
         } catch (SQLException e) {
             throw new TenantTransactionException("No se pudo leer el pedido", e);
+        }
+    }
+
+    /**
+     * Lineas que cuentan para el dinero: las NO anuladas. Los importes de cada linea los calcula el dominio (una sola
+     * fuente de verdad para el redondeo). La factura y los totales se arman solo con estas.
+     */
+    List<LineaPedido> lineasVigentes(UUID pedidoId) {
+        List<LineaPedido> lineas = new ArrayList<>();
+        try (PreparedStatement ps = tx.connection().prepareStatement("""
+                select id, producto_id, nombre, precio_unitario, tarifa_iva, codigo_iva_sri, cantidad, nota, estacion_id
+                  from pedido_items where pedido_id = ? and estado_cocina <> 'anulado' order by creado_en, id
+                """)) {
+            ps.setObject(1, pedidoId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    lineas.add(new LineaPedido(rs.getObject("id", UUID.class), rs.getObject("producto_id", UUID.class),
+                            rs.getString("nombre"), rs.getBigDecimal("precio_unitario"), rs.getBigDecimal("tarifa_iva"),
+                            rs.getString("codigo_iva_sri"), rs.getBigDecimal("cantidad"), rs.getString("nota"),
+                            rs.getObject("estacion_id", UUID.class)));
+                }
+            }
+        } catch (SQLException e) {
+            throw new TenantTransactionException("No se pudieron leer las lineas del pedido", e);
+        }
+        return lineas;
+    }
+
+    /** Estado de cocina de TODOS los items del pedido (incluidos los anulados). */
+    List<EstadoCocina> estadosDeCocina(UUID pedidoId) {
+        List<EstadoCocina> estados = new ArrayList<>();
+        try (PreparedStatement ps = tx.connection().prepareStatement("select estado_cocina from pedido_items where pedido_id = ?")) {
+            ps.setObject(1, pedidoId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    estados.add(EstadoCocina.desde(rs.getString(1)));
+                }
+            }
+        } catch (SQLException e) {
+            throw new TenantTransactionException("No se pudo leer el estado de cocina del pedido", e);
+        }
+        return estados;
+    }
+
+    /**
+     * Cambia el estado del pedido solo si sigue en {@code desde} (nadie se adelanto) y deja constancia en el historial.
+     * Debe llamarse con el pedido bloqueado.
+     *
+     * @param usuarioId quien lo origino; null para un proceso del sistema
+     */
+    void cambiarEstado(UUID id, EstadoPedido desde, EstadoPedido hasta, UUID usuarioId, String motivo, String origen) {
+        try (PreparedStatement ps = tx.connection().prepareStatement("update pedidos set estado = ? where id = ? and estado = ?")) {
+            ps.setString(1, hasta.valor());
+            ps.setObject(2, id);
+            ps.setString(3, desde.valor());
+            if (ps.executeUpdate() != 1) {
+                throw new IllegalStateException("El pedido " + id + " ya no estaba en '" + desde.valor() + "'");
+            }
+        } catch (SQLException e) {
+            throw new TenantTransactionException("No se pudo cambiar el estado del pedido", e);
+        }
+        registrarHistorial(id, desde, hasta, usuarioId, motivo, origen);
+    }
+
+    private void registrarHistorial(UUID id, EstadoPedido desde, EstadoPedido hasta, UUID usuarioId, String motivo, String origen) {
+        // clock_timestamp() y no now(): varios pasos de una misma transaccion deben quedar ordenados en el historial.
+        try (PreparedStatement ps = tx.connection().prepareStatement("""
+                insert into pedido_historial(tenant_id, pedido_id, estado_anterior, estado_nuevo, usuario_id, motivo, origen,
+                                             ocurrido_en)
+                values (?, ?, ?, ?, ?, ?, ?, clock_timestamp())
+                """)) {
+            ps.setObject(1, tx.tenantActual());
+            ps.setObject(2, id);
+            ps.setString(3, desde == null ? null : desde.valor());
+            ps.setString(4, hasta.valor());
+            ps.setObject(5, usuarioId);
+            ps.setString(6, motivo);
+            ps.setString(7, origen);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new TenantTransactionException("No se pudo registrar el historial del pedido", e);
+        }
+    }
+
+    void actualizarTotales(UUID id, Totales t) {
+        try (PreparedStatement ps = tx.connection().prepareStatement("""
+                update pedidos set subtotal = ?, descuento = ?, iva = ?, propina = ?, costo_envio = ?, total = ?
+                 where id = ?
+                """)) {
+            ps.setBigDecimal(1, t.subtotal());
+            ps.setBigDecimal(2, t.descuento());
+            ps.setBigDecimal(3, t.iva());
+            ps.setBigDecimal(4, t.propina());
+            ps.setBigDecimal(5, t.costoEnvio());
+            ps.setBigDecimal(6, t.total());
+            ps.setObject(7, id);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new TenantTransactionException("No se pudieron actualizar los totales del pedido", e);
         }
     }
 

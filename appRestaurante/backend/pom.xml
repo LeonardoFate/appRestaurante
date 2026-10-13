@@ -62,6 +62,11 @@
       <groupId>io.quarkus</groupId>
       <artifactId>quarkus-hibernate-validator</artifactId>
     </dependency>
+    <!-- Tareas periodicas: relay del outbox y worker de la cola de trabajos -->
+    <dependency>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-scheduler</artifactId>
+    </dependency>
     <!-- Emision (firma) de los JWT de acceso -->
     <dependency>
       <groupId>io.quarkus</groupId>

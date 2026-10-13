@@ -10,7 +10,7 @@ public final class PoliticaDeCobro {
     private PoliticaDeCobro() {
     }
 
-    /** Saldo pendiente: total del pedido menos lo ya cobrado. */
+    /** Saldo pendiente: total del pedido menos lo ya cobrado (NETO: lo cobrado menos lo reembolsado). */
     public static BigDecimal saldo(BigDecimal total, BigDecimal yaCobrado) {
         return total.subtract(yaCobrado);
     }
@@ -29,12 +29,23 @@ public final class PoliticaDeCobro {
         }
     }
 
-    /** Estado de pago del pedido tras cobrar {@code cobradoTotal} de un {@code total}. */
+    /** Estado de pago del pedido tras cobrar {@code cobradoTotal} de un {@code total}, cuando no hubo reembolsos. */
     public static EstadoPago estadoTras(BigDecimal total, BigDecimal cobradoTotal) {
-        int comparacion = cobradoTotal.compareTo(total);
-        if (comparacion >= 0) {
+        return estadoTras(total, cobradoTotal, false);
+    }
+
+    /**
+     * Estado de pago del pedido segun lo cobrado NETO (cobrado menos reembolsado) y si hubo reembolsos.
+     * Sin nada cobrado y con reembolsos es {@code reembolsado} (se devolvio todo); con reembolsos y algo aun cobrado,
+     * {@code reembolsado_parcial}, hasta que se vuelva a cobrar el total.
+     */
+    public static EstadoPago estadoTras(BigDecimal total, BigDecimal cobradoNeto, boolean hayReembolsos) {
+        if (cobradoNeto.signum() <= 0) {
+            return hayReembolsos ? EstadoPago.REEMBOLSADO : EstadoPago.SIN_PAGO;
+        }
+        if (cobradoNeto.compareTo(total) >= 0) {
             return EstadoPago.PAGADO;
         }
-        return cobradoTotal.signum() > 0 ? EstadoPago.PARCIAL : EstadoPago.SIN_PAGO;
+        return hayReembolsos ? EstadoPago.REEMBOLSADO_PARCIAL : EstadoPago.PARCIAL;
     }
 }

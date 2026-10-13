@@ -1,3 +1,12 @@
+-- =============================================================================
+-- tests_schema_v2.sql - pruebas del esquema (101 comprobaciones)
+--
+-- EJECUTAR SOLO SOBRE UNA BASE RECIEN CREADA con schema_restaurantes_v2.sql (por ejemplo:
+-- "docker compose down -v && docker compose up -d" en appRestaurante/backend). NO es repetible: usa RUC, correos
+-- y conteos fijos, asi que sobre una base con datos (por ejemplo, despues de las pruebas Java) varias fallan por
+-- datos duplicados, no por defectos del esquema. (Las pruebas Java si pueden repetirse sobre una base con datos.)
+-- Cada comprobacion imprime PASS o FAIL.
+-- =============================================================================
 \set ON_ERROR_STOP 0
 \pset pager off
 
@@ -103,6 +112,9 @@ select id as sup from app.buscar_usuario_login('sup@a.com') \gset
 select t_err('reembolso que excede el pago', format($f$insert into reembolsos(tenant_id,pago_id,monto,motivo,autorizado_por,estado) values (%L,%L,7.00,'x',%L,'completado')$f$, :'ta', :'pago1', :'sup'), 'excede');
 select uuid_v7() as ped2 \gset
 insert into pedidos(id,tenant_id,sucursal_id,canal,mesa_id,fecha_operativa,subtotal,total) values (:'ped2',:'ta',:'suc_a','salon',:'mesa_a',current_date,100,100);
+select t_run('tras un reembolso parcial de 2.00 se puede cobrar de nuevo esos 2.00 (la suma es NETA)', format($f$insert into pagos(id,tenant_id,pedido_id,metodo,monto,estado) values (uuid_v7(),%L,%L,'efectivo',2.00,'capturado')$f$, :'ta', :'ped'));
+select t_err('pero no mas que el neto: 0.01 de mas se rechaza', format($f$insert into pagos(id,tenant_id,pedido_id,metodo,monto,estado) values (uuid_v7(),%L,%L,'efectivo',0.01,'capturado')$f$, :'ta', :'ped'), 'excede');
+select t_run('actualizar el estado de un pago reembolsado parcialmente no rompe la suma neta', format($f$update pagos set estado = 'reembolsado_parcial' where id = %L$f$, :'pago1'));
 select t_err('pago duplicado misma referencia pasarela', format($f$insert into pagos(id,tenant_id,pedido_id,metodo,monto,pasarela,referencia_ext) values (uuid_v7(),%L,%L,'pasarela',1,'payphone','R1'),(uuid_v7(),%L,%L,'pasarela',1,'payphone','R1')$f$, :'ta', :'ped2', :'ta', :'ped2'), 'duplicate');
 
 \echo === 6. Historial, auditoria, outbox (solo insercion) ===
@@ -128,6 +140,9 @@ select app.siguiente_secuencial(:'suc_a','01','pruebas') as sec \gset
 select t_run('insertar factura', format($f$insert into comprobantes(tenant_id,sucursal_id,pedido_id,tipo,ambiente,secuencial,clave_acceso,fecha_emision,receptor_tipo_identificacion,receptor_identificacion,receptor_razon_social,subtotal_sin_impuestos,total_iva,importe_total) values (%L,%L,%L,'01','pruebas',%L,app.generar_clave_acceso(current_date,'01','1790000000001','pruebas','001','001',%L),current_date,'07','9999999999999','CONSUMIDOR FINAL',10,1.5,11.5)$f$, :'ta', :'suc_a', :'ped', :'sec', :'sec'));
 select t_err('secuencial duplicado rechazado', format($f$insert into comprobantes(tenant_id,sucursal_id,pedido_id,tipo,ambiente,secuencial,clave_acceso,fecha_emision,receptor_tipo_identificacion,receptor_identificacion,receptor_razon_social,subtotal_sin_impuestos,total_iva,importe_total) values (%L,%L,%L,'01','pruebas',%L,'%s',current_date,'07','9999999999999','CF',1,0,1)$f$, :'ta', :'suc_a', :'ped', :'sec', repeat('1',49)), 'duplicate');
 select t_err('nota de credito sin factura de referencia', format($f$insert into comprobantes(tenant_id,sucursal_id,pedido_id,tipo,ambiente,secuencial,clave_acceso,fecha_emision,receptor_tipo_identificacion,receptor_identificacion,receptor_razon_social,subtotal_sin_impuestos,total_iva,importe_total) values (%L,%L,%L,'04','pruebas','000000009','%s',current_date,'07','9999999999999','CF',1,0,1)$f$, :'ta', :'suc_a', :'ped', repeat('2',49)), 'check');
+select id as factura_id from comprobantes where tipo = '01' limit 1 \gset
+select t_run('una nota de credito vinculada a su factura', format($f$insert into comprobantes(tenant_id,sucursal_id,pedido_id,tipo,comprobante_modificado_id,motivo_modificacion,ambiente,secuencial,clave_acceso,fecha_emision,receptor_tipo_identificacion,receptor_identificacion,receptor_razon_social,subtotal_sin_impuestos,total_iva,importe_total) values (%L,%L,%L,'04',%L,'Devolucion total','pruebas','000000001','%s',current_date,'07','9999999999999','CF',10,1.5,11.5)$f$, :'ta', :'suc_a', :'ped', :'factura_id', repeat('3',49)));
+select t_err('una factura no admite dos notas de credito vigentes', format($f$insert into comprobantes(tenant_id,sucursal_id,pedido_id,tipo,comprobante_modificado_id,motivo_modificacion,ambiente,secuencial,clave_acceso,fecha_emision,receptor_tipo_identificacion,receptor_identificacion,receptor_razon_social,subtotal_sin_impuestos,total_iva,importe_total) values (%L,%L,%L,'04',%L,'Otra','pruebas','000000002','%s',current_date,'07','9999999999999','CF',10,1.5,11.5)$f$, :'ta', :'suc_a', :'ped', :'factura_id', repeat('4',49)), 'duplicate');
 select t_err('autorizado sin numero de autorizacion', format($f$update comprobantes set estado_sri='autorizado' where tenant_id=%L$f$, :'ta'), 'check');
 
 \echo === 8. Sync idempotente ===
@@ -170,9 +185,28 @@ select t_ok('...pero invisible para el tenant B', (select count(*) from usuarios
 select t_ok('membresias_de_usuario cruza tenants', (select count(*) from app.membresias_de_usuario(:'usr')) = 1);
 select t_err('app_backend no puede insertar usuarios directo', $$insert into usuarios(email,nombre) values ('x@x.com','x')$$, 'permission');
 
+\echo === 10b. Cola de trabajos (jobs) ===
+select set_config('app.tenant_id', :'ta', false);
+select t_run('encolar un job', format($f$insert into jobs(tenant_id, cola, tipo, clave_unica) values (%L, 'sri', 'sri.emitir', 'k1')$f$, :'ta'));
+select t_err('clave_unica duplicada en la misma cola y tenant rechazada', format($f$insert into jobs(tenant_id, cola, tipo, clave_unica) values (%L, 'sri', 'sri.emitir', 'k1')$f$, :'ta'), 'duplicate');
+select t_run('la misma clave_unica en otra cola si se permite', format($f$insert into jobs(tenant_id, cola, tipo, clave_unica) values (%L, 'notificaciones', 'x', 'k1')$f$, :'ta'));
+select t_err('un job en_proceso exige lease', format($f$insert into jobs(tenant_id, cola, tipo, estado) values (%L, 'sri', 'x', 'en_proceso')$f$, :'ta'), 'check');
+select t_err('un job completado exige completado_en', format($f$insert into jobs(tenant_id, cola, tipo, estado) values (%L, 'sri', 'x', 'completado')$f$, :'ta'), 'check');
+select t_ok('el tenant A ve sus jobs', (select count(*) from jobs) = 2);
+select set_config('app.tenant_id', :'tb', false);
+select t_ok('el tenant B no ve los jobs de A', (select count(*) from jobs) = 0);
+select t_err('el tenant B no puede crear jobs para A', format($f$insert into jobs(tenant_id, cola, tipo) values (%L, 'sri', 'x')$f$, :'ta'), 'row-level security');
+
 \echo === 11. Scheduler (cross-tenant, minimo privilegio) ===
 reset role;
 set role app_scheduler;
+select t_ok('scheduler ve los jobs de todos los tenants', (select count(*) from jobs) >= 2);
+select t_run('scheduler reclama un job (lease)', $$update jobs set estado = 'en_proceso', intentos = intentos + 1, bloqueado_hasta = now() + interval '1 minute', bloqueado_por = 'w1' where id = (select id from jobs where estado = 'pendiente' order by creado_en limit 1 for update skip locked)$$);
+select t_run('scheduler reprograma un job fallido', $$update jobs set estado = 'pendiente', proximo_intento_en = now() + interval '10 seconds', ultimo_error = 'x', bloqueado_hasta = null, bloqueado_por = null where bloqueado_por = 'w1'$$);
+select t_err('scheduler no puede modificar el payload de un job (solo el estado y la reprogramacion)', $$update jobs set payload = '{}'::jsonb$$, 'permission');
+select t_err('scheduler no puede borrar jobs', 'delete from jobs', 'permission');
+select t_err('scheduler no puede insertar jobs', $$insert into jobs(tenant_id, cola, tipo) select id, 'x', 'x' from tenants limit 1$$, 'permission');
+select t_run('scheduler reprograma un evento del outbox', $$update outbox set proximo_intento_en = now() + interval '1 minute' where false$$);
 select t_ok('scheduler ve outbox pendiente sin tenant', (select count(*) from outbox where publicado_en is null) >= 1);
 select t_run('scheduler marca publicado', $$update outbox set publicado_en = now() where publicado_en is null$$);
 select t_err('scheduler no puede leer pedidos', 'select * from pedidos', 'permission');

@@ -15,6 +15,7 @@ import java.util.UUID;
  */
 public record PedidoVista(
         UUID id,
+        UUID sucursalId,
         Integer numero,
         CanalPedido canal,
         String estado,
@@ -23,11 +24,16 @@ public record PedidoVista(
         List<Linea> lineas,
         boolean creadoAhora) {
 
+    /**
+     * Linea del pedido con los importes ya calculados por el dominio (una sola fuente de verdad para el redondeo):
+     * {@code subtotal} es la base imponible e {@code iva} el impuesto de esa linea.
+     */
     public record Linea(UUID id, UUID productoId, String nombre, BigDecimal precioUnitario,
-                        BigDecimal porcentajeIva, BigDecimal cantidad, String nota) {
+                        BigDecimal porcentajeIva, String codigoIvaSri, BigDecimal cantidad, String nota,
+                        BigDecimal subtotal, BigDecimal iva) {
     }
 
     public PedidoVista comoRepeticion() {
-        return new PedidoVista(id, numero, canal, estado, estadoPago, totales, lineas, false);
+        return new PedidoVista(id, sucursalId, numero, canal, estado, estadoPago, totales, lineas, false);
     }
 }

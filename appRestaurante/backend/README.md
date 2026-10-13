@@ -9,6 +9,12 @@ Decisiones y contexto: [ADR-014](../../01%20Decisiones/ADR-014%20Backend%20en%20
 |---|---|---|
 | `POST /api/v1/pedidos` | owner, admin, cajero, mesero | Crea un pedido. El cliente envía `id` (UUIDv7), `canal` (`salon` o `para_llevar`), `mesaId` y `items[productoId, cantidad, nota]`. **No envía precios ni totales**: salen del menú. 201 si lo crea, 200 si es una repetición idempotente |
 | `GET /api/v1/pedidos/{id}` | ídem | Consulta un pedido del restaurante del token (404 si no existe o es de otro) |
+| `POST /api/v1/pedidos/{id}/confirmar` | owner, admin, cajero, mesero | Manda el pedido a cocina (`PedidoConfirmado`). Idempotente. Cocina recibe los ítems con ≤ 1 s de retraso |
+| `POST /api/v1/pedidos/{id}/cancelar` `{motivo}` | owner, admin, cajero | Cancela con motivo. Solo antes de entregar y **sin cobros** (la devolución aún no existe) |
+| `GET /api/v1/cocina/estaciones`, `GET /api/v1/cocina/items?estacion=` | cocina, admin, owner, mesero, cajero | La pantalla de cocina (KDS): ítems enviados, preparando o listos de la **sucursal del token**, del más antiguo al más reciente |
+| `POST /api/v1/cocina/items/{id}/preparando` y `/listo` | cocina, admin, owner | Cambia el estado del ítem; el pedido avanza solo. Idempotente |
+| `POST /api/v1/cocina/items/{id}/servido` | mesero, cajero, cocina, admin, owner | El mesero sirve el ítem. Con todos servidos el pedido queda `entregado` y, si está pagado, `cerrado` |
+| `POST /api/v1/cocina/items/{id}/anular` `{motivo}` | owner, admin, cajero | Anula un ítem: recalcula los totales; sin cobros |
 | `POST /api/v1/pagos` | ídem | Registra un cobro (`id`, `pedidoId`, `metodo`, `monto`). Idempotente por `id`. Al completar el total escribe `PedidoPagado` en el outbox |
 | `POST /api/v1/auth/login` | público | Correo y contraseña → JWT de acceso (15 min) + refresh token. `tenantId` y `sucursalId` solo si el usuario tiene varios. Tras 5 fallos la cuenta se bloquea 15 min; los errores no revelan si el usuario existe |
 | `POST /api/v1/auth/refresh` | público | Cambia un refresh token (de **un solo uso**) por tokens nuevos. Reutilizar uno ya usado cierra toda la sesión |
@@ -31,7 +37,8 @@ src/main/java/com/restaurantes/
   shared/events/    Outbox (eventos en la misma transaccion)
   shared/errors/    ReglaDeNegocioException (Java puro) · shared/web/ traduccion a HTTP
   shared/ids/       UuidV7
-  menu/ pedidos/ pagos/ auth/   con codigo; el resto de modulos solo tiene su package-info
+  shared/jobs/      ColaDeJobs, JobWorker, ProcesadorDeJob, TareasPeriodicas
+  menu/ pedidos/ pagos/ auth/ facturacion/ plataforma/ cocina/ salon/   con codigo; el resto de modulos solo tiene su package-info
   auth/ menu/ salon/ pedidos/ cocina/ delivery/ pagos/ facturacion/ sync/ reportes/ plataforma/
                     un paquete por modulo: api (publico) · internal (privado) · domain (Java puro)
 ```
@@ -52,7 +59,20 @@ docker run --rm -v "$PWD":/work -w /work -v restaurantes-m2:/root/.m2 \
   maven:3.9-eclipse-temurin-21 mvn -B test
 ```
 
-## Pruebas (91)
+## Eventos, cola de trabajos y facturación
+
+- **Outbox** (`shared.events.Outbox`): un caso de uso escribe el evento en la misma transacción del cambio. Ejemplo: al completar el cobro, `PedidoPagado`.
+- **Relay** (`OutboxRelay`, cada 1 s): entrega cada evento a los `ManejadorDeEvento` suscritos. Cada manejador corre en su transacción del tenant, con deduplicación por consumidor en esa misma transacción; si falla, se reintenta con espera creciente (5 s hasta 1 h).
+- **Cola de trabajos** (`ColaDeJobs`, `JobWorker`, cada 2 s): tabla `jobs` en PostgreSQL con lease, reintentos y cola de fallidos. Un procesador implementa `ProcesadorDeJob`.
+- **Facturación** (`facturacion`): al llegar `PedidoPagado` crea el comprobante en estado `generado` (secuencial, clave de acceso, detalles) y encola el trabajo `sri.emitir`. **El procesador de `sri.emitir` aún no existe**: el trabajo queda `pendiente` hasta el spike del SRI.
+- El relay y el worker usan un **segundo datasource (`scheduler`)** con otro login (`sched_login`, **con `BYPASSRLS` propio**, rol `app_scheduler`) y privilegios mínimos sobre `outbox` y `jobs`. En producción: `SCHEDULER_DB_URL`, `SCHEDULER_DB_USER`, `SCHEDULER_DB_PASSWORD`.
+- En las pruebas el planificador está apagado y cada prueba invoca el relay y el worker a mano (determinista); `SchedulerActivoTest` lo enciende para comprobar el funcionamiento periódico.
+
+## Pedido y cocina
+
+El estado del pedido sigue una **tabla de transiciones por canal** (`pedidos.domain.MaquinaDeEstados`, probada par por par): `creado → confirmado → en_preparacion → listo → entregado → cerrado`. **Se deriva del estado de sus ítems** (la cocina marca ítems; el pedido avanza solo, de a un paso, sin retroceder). Solo `pedidos` cambia el estado del pedido; `cocina` cambia el de cada ítem y lo notifica. Más detalle en `../../01 Decisiones/ADR-019 Máquina de estados del pedido y cocina.md`.
+
+## Pruebas (175)
 
 Contra la base real, sin mocks de la base ni de la identidad: aislamiento entre tenants, flujo HTTP completo con JWT firmados, concurrencia (perfil `PoolGrande`, 16 conexiones), dominio puro y reglas de arquitectura. El perfil normal usa **una** conexion a proposito, para que cualquier fuga de contexto entre usos se vea al instante.
 

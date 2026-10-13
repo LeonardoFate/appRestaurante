@@ -54,6 +54,52 @@ public class Escenario {
         return id;
     }
 
+    /** Crea una estacion de cocina activa en la sucursal y devuelve su id. */
+    public UUID crearEstacion(UUID tenantId, UUID sucursalId, String nombre) {
+        UUID id = UuidV7.next();
+        ejecutar(tenantId, "insert into estaciones_cocina(id, tenant_id, sucursal_id, nombre) values (?, ?, ?, ?)",
+                id, tenantId, sucursalId, nombre);
+        return id;
+    }
+
+    /** Asigna una estacion a un producto en una sucursal (productos_sucursal). Debe hacerse ANTES de crear el pedido. */
+    public void asignarEstacion(UUID tenantId, UUID productoId, UUID sucursalId, UUID estacionId) {
+        ejecutar(tenantId, "insert into productos_sucursal(tenant_id, producto_id, sucursal_id, estacion_id) values (?, ?, ?, ?)",
+                tenantId, productoId, sucursalId, estacionId);
+    }
+
+    /** Crea otro producto del restaurante (IVA 15 %) y devuelve su id. */
+    public UUID crearProducto(UUID tenantId, String nombre, String precio) {
+        UUID id = UuidV7.next();
+        tx.runInTenant(tenantId, c -> {
+            try (PreparedStatement ps = c.prepareStatement("""
+                    insert into productos(id, tenant_id, categoria_id, nombre, precio_base, tarifa_iva_id)
+                    values (?, ?, (select id from categorias where tenant_id = ? limit 1), ?, ?,
+                            (select id from tarifas_iva where tenant_id is null and codigo_sri = '4'
+                              order by vigente_desde desc limit 1))
+                    """)) {
+                ps.setObject(1, id);
+                ps.setObject(2, tenantId);
+                ps.setObject(3, tenantId);
+                ps.setString(4, nombre);
+                ps.setBigDecimal(5, new BigDecimal(precio));
+                ps.executeUpdate();
+            }
+        });
+        return id;
+    }
+
+    /** Igual que {@link #token} pero para trabajar en otra sucursal del mismo restaurante. */
+    public String tokenEnSucursal(Restaurante r, UUID sucursalId, String... roles) {
+        return Jwt.issuer("restaurantes")
+                .subject(r.usuarioId().toString())
+                .groups(Set.of(roles))
+                .claim("tenant_id", r.tenantId().toString())
+                .claim("sucursal_id", sucursalId.toString())
+                .expiresIn(Duration.ofMinutes(5))
+                .sign();
+    }
+
     /** Crea un restaurante con un producto que cuesta {@code precio} antes de IVA (IVA 15 %). */
     public Restaurante crearRestaurante(String precio) {
         UUID tenant = UuidV7.next();
@@ -137,6 +183,20 @@ public class Escenario {
                 try (ResultSet rs = ps.executeQuery()) {
                     rs.next();
                     return rs.getLong(1);
+                }
+            }
+        });
+    }
+
+    /** Primer valor de la primera fila como texto (null si no hay filas o el valor es NULL). */
+    public String texto(UUID tenant, String sql, Object... args) {
+        return tx.withTenant(tenant, c -> {
+            try (PreparedStatement ps = c.prepareStatement(sql)) {
+                for (int i = 0; i < args.length; i++) {
+                    ps.setObject(i + 1, args[i]);
+                }
+                try (ResultSet rs = ps.executeQuery()) {
+                    return rs.next() ? rs.getString(1) : null;
                 }
             }
         });
