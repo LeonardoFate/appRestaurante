@@ -151,6 +151,29 @@ class FacturacionFlujoTest {
     }
 
     @Test
+    void laFacturaDeUnPedidoConPropinaSeparaLaPropinaYCuadra() {
+        Restaurante r = escenario.crearRestaurante("10.00");
+        String token = escenario.token(r, "cajero");
+        UUID pedidoId = UuidV7.next();
+        Response pedido = given().auth().oauth2(token).contentType(ContentType.JSON)
+                .body(Map.of("id", pedidoId.toString(), "canal", "salon", "mesaId", r.mesaId().toString(), "propina", new BigDecimal("1.15"),
+                        "items", List.of(Map.of("productoId", r.productoId().toString(), "cantidad", new BigDecimal("1")))))
+                .when().post("/api/v1/pedidos");
+        assertEquals(201, pedido.statusCode(), pedido.asString());   // 10 + 1.50 IVA + 1.15 propina = 12.65
+        Response pago = given().auth().oauth2(token).contentType(ContentType.JSON)
+                .body(Map.of("id", UuidV7.next().toString(), "pedidoId", pedidoId.toString(), "metodo", "efectivo", "monto", new BigDecimal("12.65")))
+                .when().post("/api/v1/pagos");
+        assertEquals(201, pago.statusCode(), pago.asString());
+
+        drenar();
+
+        assertEquals("10.00", comprobante(r, pedidoId, "subtotal_sin_impuestos::text"));
+        assertEquals("1.50", comprobante(r, pedidoId, "total_iva::text"));
+        assertEquals("1.15", comprobante(r, pedidoId, "propina::text"));
+        assertEquals("12.65", comprobante(r, pedidoId, "importe_total::text"));
+    }
+
+    @Test
     void laClaveDeAccesoTiene49DigitosYLaEstructuraDelSri() {
         Restaurante r = escenario.crearRestaurante("10.00");
         UUID pedidoId = pedidoPagado(r, "1");

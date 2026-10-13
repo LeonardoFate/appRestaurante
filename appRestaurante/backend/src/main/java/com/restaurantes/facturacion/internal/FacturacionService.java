@@ -78,7 +78,7 @@ class FacturacionService {
         UUID comprobanteId = UuidV7.next();
         repo.insertarFactura(comprobanteId, pedido, emisor.ambiente(), secuencial, claveAcceso, fechaEmision,
                 Receptor.consumidorFinal());
-        repo.insertarDetalles(comprobanteId, pedido.lineas());
+        repo.insertarDetalles(comprobanteId, pedido.lineas(), pedido.totales().costoEnvio());
         repo.registrarEvento(comprobanteId, "generado", null);
 
         // El trabajo existe si y solo si el comprobante se confirmo. La clave unica evita duplicarlo.

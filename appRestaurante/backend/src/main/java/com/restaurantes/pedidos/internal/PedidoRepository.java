@@ -1,5 +1,6 @@
 package com.restaurantes.pedidos.internal;
 
+import com.restaurantes.pedidos.api.NuevoPedido;
 import com.restaurantes.pedidos.api.PedidoVista;
 import com.restaurantes.pedidos.domain.CanalPedido;
 import com.restaurantes.pedidos.domain.EstadoCocina;
@@ -55,66 +56,102 @@ class PedidoRepository {
     }
 
     void insertar(UUID id, UUID sucursalId, int numero, CanalPedido canal, UUID mesaId, UUID usuarioId,
-                  LocalDate fechaOperativa, Totales t, List<LineaPedido> lineas) {
+                  LocalDate fechaOperativa, Totales t, List<LineaPedido> lineas, NuevoPedido.Envio envio) {
         Connection c = tx.connection();
         UUID tenant = tx.tenantActual();
         try {
             try (PreparedStatement ps = c.prepareStatement("""
                     insert into pedidos(id, tenant_id, sucursal_id, numero, canal, estado, estado_pago, momento_pago,
-                                        mesa_id, usuario_id, fecha_operativa,
+                                        mesa_id, usuario_id, fecha_operativa, cliente_id, direccion_id,
                                         subtotal, descuento, iva, propina, costo_envio, total)
-                    values (?, ?, ?, ?, ?, 'creado', 'sin_pago', 'al_final', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    values (?, ?, ?, ?, ?, 'creado', 'sin_pago', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """)) {
                 ps.setObject(1, id);
                 ps.setObject(2, tenant);
                 ps.setObject(3, sucursalId);
                 ps.setInt(4, numero);
                 ps.setString(5, canal.valor());
-                ps.setObject(6, mesaId);
-                ps.setObject(7, usuarioId);
-                ps.setObject(8, fechaOperativa);
-                ps.setBigDecimal(9, t.subtotal());
-                ps.setBigDecimal(10, t.descuento());
-                ps.setBigDecimal(11, t.iva());
-                ps.setBigDecimal(12, t.propina());
-                ps.setBigDecimal(13, t.costoEnvio());
-                ps.setBigDecimal(14, t.total());
+                ps.setString(6, envio == null ? "al_final" : envio.momentoPago());
+                ps.setObject(7, mesaId);
+                ps.setObject(8, usuarioId);
+                ps.setObject(9, fechaOperativa);
+                ps.setObject(10, envio == null ? null : envio.clienteId());
+                ps.setObject(11, envio == null ? null : envio.direccionId());
+                ps.setBigDecimal(12, t.subtotal());
+                ps.setBigDecimal(13, t.descuento());
+                ps.setBigDecimal(14, t.iva());
+                ps.setBigDecimal(15, t.propina());
+                ps.setBigDecimal(16, t.costoEnvio());
+                ps.setBigDecimal(17, t.total());
                 ps.executeUpdate();
             }
-            try (PreparedStatement ps = c.prepareStatement("""
-                    insert into pedido_items(id, tenant_id, pedido_id, producto_id, nombre, precio_unitario, tarifa_iva,
-                                             codigo_iva_sri, cantidad, nota, estacion_id)
-                    values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """)) {
-                for (LineaPedido l : lineas) {
-                    ps.setObject(1, l.id());
-                    ps.setObject(2, tenant);
-                    ps.setObject(3, id);
-                    ps.setObject(4, l.productoId());
-                    ps.setString(5, l.nombre());
-                    ps.setBigDecimal(6, l.precioUnitario());
-                    ps.setBigDecimal(7, l.porcentajeIva());
-                    ps.setString(8, l.codigoIvaSri());
-                    ps.setBigDecimal(9, l.cantidad());
-                    ps.setString(10, l.nota());
-                    ps.setObject(11, l.estacionId());
-                    ps.addBatch();
-                }
-                ps.executeBatch();
-            }
+            insertarItems(id, lineas);
             registrarHistorial(id, null, EstadoPedido.CREADO, usuarioId, null, "api");
         } catch (SQLException e) {
             throw new TenantTransactionException("No se pudo guardar el pedido", e);
         }
     }
 
+
+    /** Agrega items a un pedido ya creado (misma insercion que al crearlo). */
+    void agregarItems(UUID pedidoId, List<LineaPedido> lineas) {
+        try {
+            insertarItems(pedidoId, lineas);
+        } catch (SQLException e) {
+            throw new TenantTransactionException("No se pudieron agregar los items", e);
+        }
+    }
+
+    private void insertarItems(UUID pedidoId, List<LineaPedido> lineas) throws SQLException {
+        UUID tenant = tx.tenantActual();
+        try (PreparedStatement ps = tx.connection().prepareStatement("""
+                insert into pedido_items(id, tenant_id, pedido_id, producto_id, nombre, precio_unitario, tarifa_iva,
+                                         codigo_iva_sri, cantidad, nota, estacion_id)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """)) {
+            for (LineaPedido l : lineas) {
+                ps.setObject(1, l.id());
+                ps.setObject(2, tenant);
+                ps.setObject(3, pedidoId);
+                ps.setObject(4, l.productoId());
+                ps.setString(5, l.nombre());
+                ps.setBigDecimal(6, l.precioUnitario());
+                ps.setBigDecimal(7, l.porcentajeIva());
+                ps.setString(8, l.codigoIvaSri());
+                ps.setBigDecimal(9, l.cantidad());
+                ps.setString(10, l.nota());
+                ps.setObject(11, l.estacionId());
+                ps.addBatch();
+            }
+            ps.executeBatch();
+        }
+    }
+
+    /** De los ids dados, los que ya existen como item (de cualquier pedido del restaurante) y a que pedido pertenecen. */
+    java.util.Map<UUID, UUID> pedidoDeCadaItem(List<UUID> itemIds) {
+        java.util.Map<UUID, UUID> resultado = new java.util.HashMap<>();
+        if (itemIds.isEmpty()) {
+            return resultado;
+        }
+        try (PreparedStatement ps = tx.connection().prepareStatement("select id, pedido_id from pedido_items where id = any (?)")) {
+            ps.setArray(1, tx.connection().createArrayOf("uuid", itemIds.toArray()));
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    resultado.put(rs.getObject(1, UUID.class), rs.getObject(2, UUID.class));
+                }
+            }
+        } catch (SQLException e) {
+            throw new TenantTransactionException("No se pudieron consultar los items", e);
+        }
+        return resultado;
+    }
     /** @param bloquear si es true, toma el bloqueo de fila ({@code FOR UPDATE}) hasta el fin de la transaccion */
     Optional<PedidoVista> buscar(UUID id, boolean bloquear) {
         Connection c = tx.connection();
         try {
             PedidoVista cabecera;
             String sql = """
-                    select id, sucursal_id, numero, canal, estado, estado_pago, subtotal, descuento, iva, propina,
+                    select id, sucursal_id, numero, canal, estado, estado_pago, momento_pago, subtotal, descuento, iva, propina,
                            costo_envio, total
                       from pedidos where id = ?
                     """ + (bloquear ? " for update" : "");
@@ -136,6 +173,7 @@ class PedidoRepository {
                             CanalPedido.desde(rs.getString("canal")),
                             rs.getString("estado"),
                             EstadoPago.desde(rs.getString("estado_pago")),
+                            rs.getString("momento_pago"),
                             totales, List.of(), false);
                 }
             }
@@ -145,7 +183,7 @@ class PedidoRepository {
                         l.codigoIvaSri(), l.cantidad(), l.nota(), l.subtotal(), l.iva()));
             }
             return Optional.of(new PedidoVista(cabecera.id(), cabecera.sucursalId(), cabecera.numero(), cabecera.canal(),
-                    cabecera.estado(), cabecera.estadoPago(), cabecera.totales(), lineas, false));
+                    cabecera.estado(), cabecera.estadoPago(), cabecera.momentoPago(), cabecera.totales(), lineas, false));
         } catch (SQLException e) {
             throw new TenantTransactionException("No se pudo leer el pedido", e);
         }

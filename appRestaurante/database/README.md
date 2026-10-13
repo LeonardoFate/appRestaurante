@@ -3,7 +3,7 @@
 | Archivo | Contenido |
 |---|---|
 | `schema_restaurantes_v2.sql` | Esquema PostgreSQL 15+: 51 tablas, RLS forzado, roles, funciones (`app.*`), triggers y particiones |
-| `tests_schema_v2.sql` | 101 comprobaciones: aislamiento de tenants, integridad, secuenciales, sync idempotente, permisos, particiones, bloqueo de login y cola de trabajos |
+| `tests_schema_v2.sql` | 108 comprobaciones: aislamiento de tenants, integridad, secuenciales, sync idempotente, permisos, particiones, bloqueo de login y cola de trabajos |
 
 El modelo y las reglas de diseño están documentados en `../../modelo_datos_restaurantes.md`; los resultados de las pruebas de concurrencia y volumen, en `../../pruebas_resultados.md`.
 
@@ -33,7 +33,7 @@ Si faltara, RLS se le aplicaría y fallaría con `unrecognized configuration par
 psql -U postgres -d restaurantes -f tests_schema_v2.sql
 ```
 
-Cada línea imprime `PASS` o `FAIL`. **No son repetibles**: usan RUC, correos y conteos fijos. Sobre una base con datos (por ejemplo, después de las pruebas Java) varias fallan por datos duplicados, no por defectos del esquema (comprobado: 101 PASS y 0 FAIL sobre base limpia; 47 PASS y 23 FAIL sobre una base sucia). Nunca contra datos reales.
+Cada línea imprime `PASS` o `FAIL`. **No son repetibles**: usan RUC, correos y conteos fijos. Sobre una base con datos (por ejemplo, después de las pruebas Java) varias fallan por datos duplicados, no por defectos del esquema (comprobado: 108 PASS y 0 FAIL sobre base limpia; 47 PASS y 23 FAIL sobre una base sucia). Nunca contra datos reales.
 
 ## Reglas de uso
 

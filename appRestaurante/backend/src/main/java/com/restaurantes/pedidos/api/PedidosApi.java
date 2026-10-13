@@ -1,6 +1,7 @@
 package com.restaurantes.pedidos.api;
 
 import com.restaurantes.pedidos.domain.EstadoPago;
+import com.restaurantes.pedidos.domain.EstadoPedido;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -27,6 +28,15 @@ public interface PedidosApi {
     void actualizarEstadoPago(UUID pedidoId, EstadoPago nuevoEstado);
 
     /**
+     * Agrega items a un pedido que aun no esta listo (creado, confirmado o en preparacion) y que no se ha pagado por
+     * completo. Recalcula los totales y, si cocina ya recibio el pedido, publica {@code ItemsAgregados} para que los items
+     * nuevos lleguen a su estacion. Idempotente por id de item. El precio sale del menu, nunca del llamante.
+     *
+     * @return el pedido con sus totales nuevos; {@code creadoAhora} es false si era la repeticion de una peticion ya aplicada
+     */
+    PedidoVista agregarItems(UUID pedidoId, java.util.List<NuevoPedido.NuevaLinea> lineas, UUID usuarioId);
+
+    /**
      * Confirma el pedido (creado -> confirmado) y publica {@code PedidoConfirmado}, que hace que cocina envie los items
      * a sus estaciones. Idempotente: si ya estaba confirmado (o mas adelante) no hace nada.
      *
@@ -36,7 +46,7 @@ public interface PedidosApi {
 
     /**
      * Cancela el pedido con un motivo y publica {@code PedidoCancelado}. Solo antes de entregar y solo si no hay cobros:
-     * con cobros corresponde una devolucion (aun no disponible). Idempotente si ya estaba cancelado.
+     * con cobros hay que reembolsar primero (ver {@code registrarDevolucion}). Idempotente si ya estaba cancelado.
      */
     PedidoVista cancelar(UUID pedidoId, String motivo, UUID usuarioId);
 
@@ -59,4 +69,13 @@ public interface PedidosApi {
      * @param usuarioId quien origino el cambio; null si lo origino un proceso del sistema (queda como origen "sistema")
      */
     void sincronizarConItems(UUID pedidoId, UUID usuarioId);
+
+    /**
+     * Lo invoca {@code delivery} al mover un pedido a domicilio por su tramo de reparto: {@code asignado}, {@code en_camino}
+     * o {@code entregado}, siempre de a un paso y segun la maquina de estados. Al llegar a {@code entregado} lo cierra si
+     * ya esta pagado. Idempotente: si ya esta en ese estado no hace nada. Solo vale para el canal delivery.
+     *
+     * @param destino uno de {@code ASIGNADO}, {@code EN_CAMINO}, {@code ENTREGADO}
+     */
+    PedidoVista avanzarEntrega(UUID pedidoId, EstadoPedido destino, UUID usuarioId);
 }

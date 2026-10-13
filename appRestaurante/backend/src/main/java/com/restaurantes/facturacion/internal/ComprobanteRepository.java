@@ -22,7 +22,8 @@ class ComprobanteRepository {
 
     /** Factura vigente de un pedido, con lo necesario para acreditarla. */
     record FacturaVigente(UUID id, UUID sucursalId, String ambiente, String secuencial, LocalDate fechaEmision,
-                          Receptor receptor, BigDecimal subtotalSinImpuestos, BigDecimal totalIva, BigDecimal importeTotal) {
+                          Receptor receptor, BigDecimal subtotalSinImpuestos, BigDecimal totalIva, BigDecimal propina,
+                          BigDecimal importeTotal) {
     }
 
     @Inject
@@ -36,7 +37,7 @@ class ComprobanteRepository {
         try (PreparedStatement ps = tx.connection().prepareStatement("""
                 select id, sucursal_id, ambiente, secuencial, fecha_emision, receptor_tipo_identificacion,
                        receptor_identificacion, receptor_razon_social, receptor_email,
-                       subtotal_sin_impuestos, total_iva, importe_total
+                       subtotal_sin_impuestos, total_iva, propina, importe_total
                   from comprobantes where pedido_id = ? and tipo = '01' and estado_sri <> 'anulado'
                 """)) {
             ps.setObject(1, pedidoId);
@@ -48,7 +49,8 @@ class ComprobanteRepository {
                         rs.getString("ambiente"), rs.getString("secuencial"), rs.getObject("fecha_emision", LocalDate.class),
                         new Receptor(rs.getString("receptor_tipo_identificacion"), rs.getString("receptor_identificacion"),
                                 rs.getString("receptor_razon_social"), rs.getString("receptor_email")),
-                        rs.getBigDecimal("subtotal_sin_impuestos"), rs.getBigDecimal("total_iva"), rs.getBigDecimal("importe_total")));
+                        rs.getBigDecimal("subtotal_sin_impuestos"), rs.getBigDecimal("total_iva"), rs.getBigDecimal("propina"),
+                        rs.getBigDecimal("importe_total")));
             }
         } catch (SQLException e) {
             throw new TenantTransactionException("No se pudo leer la factura del pedido", e);
@@ -98,8 +100,8 @@ class ComprobanteRepository {
                 insert into comprobantes(id, tenant_id, sucursal_id, pedido_id, tipo, ambiente, secuencial, clave_acceso,
                                          fecha_emision, receptor_tipo_identificacion, receptor_identificacion,
                                          receptor_razon_social, receptor_email,
-                                         subtotal_sin_impuestos, total_iva, importe_total)
-                values (?, ?, ?, ?, '01', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                         subtotal_sin_impuestos, total_iva, propina, importe_total)
+                values (?, ?, ?, ?, '01', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """)) {
             ps.setObject(1, id);
             ps.setObject(2, tx.tenantActual());
@@ -113,9 +115,11 @@ class ComprobanteRepository {
             ps.setString(10, receptor.identificacion());
             ps.setString(11, receptor.razonSocial());
             ps.setString(12, receptor.email());
-            ps.setBigDecimal(13, pedido.totales().subtotal());
+            // Base = items + envio (el envio se factura como una linea sin IVA); la propina va aparte.
+            ps.setBigDecimal(13, pedido.totales().subtotal().subtract(pedido.totales().descuento()).add(pedido.totales().costoEnvio()));
             ps.setBigDecimal(14, pedido.totales().iva());
-            ps.setBigDecimal(15, pedido.totales().total());
+            ps.setBigDecimal(15, pedido.totales().propina());
+            ps.setBigDecimal(16, pedido.totales().total());
             ps.executeUpdate();
         } catch (SQLException e) {
             throw new TenantTransactionException("No se pudo guardar el comprobante", e);
@@ -129,8 +133,8 @@ class ComprobanteRepository {
                 insert into comprobantes(id, tenant_id, sucursal_id, pedido_id, tipo, comprobante_modificado_id,
                                          motivo_modificacion, ambiente, secuencial, clave_acceso, fecha_emision,
                                          receptor_tipo_identificacion, receptor_identificacion, receptor_razon_social,
-                                         receptor_email, subtotal_sin_impuestos, total_iva, importe_total)
-                values (?, ?, ?, ?, '04', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                         receptor_email, subtotal_sin_impuestos, total_iva, propina, importe_total)
+                values (?, ?, ?, ?, '04', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """)) {
             ps.setObject(1, id);
             ps.setObject(2, tx.tenantActual());
@@ -148,7 +152,8 @@ class ComprobanteRepository {
             ps.setString(14, factura.receptor().email());
             ps.setBigDecimal(15, factura.subtotalSinImpuestos());
             ps.setBigDecimal(16, factura.totalIva());
-            ps.setBigDecimal(17, factura.importeTotal());
+            ps.setBigDecimal(17, factura.propina());
+            ps.setBigDecimal(18, factura.importeTotal());
             ps.executeUpdate();
         } catch (SQLException e) {
             throw new TenantTransactionException("No se pudo guardar la nota de credito", e);
@@ -172,7 +177,7 @@ class ComprobanteRepository {
         }
     }
 
-    void insertarDetalles(UUID comprobanteId, List<PedidoVista.Linea> lineas) {
+    void insertarDetalles(UUID comprobanteId, List<PedidoVista.Linea> lineas, BigDecimal costoEnvio) {
         try (PreparedStatement ps = tx.connection().prepareStatement("""
                 insert into comprobante_detalles(tenant_id, comprobante_id, linea, codigo, descripcion, cantidad,
                                                  precio_unitario, descuento, base_imponible, codigo_iva_sri, tarifa_iva, valor_iva)
@@ -191,6 +196,21 @@ class ComprobanteRepository {
                 ps.setString(9, l.codigoIvaSri());
                 ps.setBigDecimal(10, l.porcentajeIva());
                 ps.setBigDecimal(11, l.iva());
+                ps.addBatch();
+            }
+            if (costoEnvio.signum() > 0) {
+                // SUPUESTO no verificado con el SRI: el envio es una linea propia sin IVA (codigo 0).
+                ps.setObject(1, tx.tenantActual());
+                ps.setObject(2, comprobanteId);
+                ps.setInt(3, numero);
+                ps.setString(4, "ENVIO");
+                ps.setString(5, "Servicio de entrega");
+                ps.setBigDecimal(6, BigDecimal.ONE);
+                ps.setBigDecimal(7, costoEnvio);
+                ps.setBigDecimal(8, costoEnvio);
+                ps.setString(9, "0");
+                ps.setBigDecimal(10, BigDecimal.ZERO);
+                ps.setBigDecimal(11, BigDecimal.ZERO);
                 ps.addBatch();
             }
             ps.executeBatch();

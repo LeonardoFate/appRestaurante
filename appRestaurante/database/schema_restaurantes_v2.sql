@@ -16,7 +16,7 @@
 --     RLS se les seguiria aplicando.
 --   * PgBouncer en modo "transaction" y SIEMPRE SET LOCAL app.tenant_id (nunca SET).
 --
--- ESTADO: validado en PostgreSQL 15.19 y 16 con tests_schema_v2.sql (101 comprobaciones),
+-- ESTADO: validado en PostgreSQL 15.19 y 16 con tests_schema_v2.sql (108 comprobaciones),
 -- con PgBouncer 1.26 en modo transaction, con pruebas de concurrencia (pgbench) y con
 -- 500k pedidos. Resultados y reglas de uso en pruebas_resultados.md.
 --
@@ -801,6 +801,7 @@ create table comprobantes (
   receptor_email               text,
   subtotal_sin_impuestos       numeric(12,2) not null check (subtotal_sin_impuestos >= 0),
   total_iva                    numeric(12,2) not null check (total_iva >= 0),
+  propina                      numeric(12,2) not null default 0 check (propina >= 0),
   importe_total                numeric(12,2) not null check (importe_total >= 0),
   numero_autorizacion          text,
   fecha_autorizacion           timestamptz,
@@ -818,6 +819,8 @@ create table comprobantes (
   foreign key (tenant_id, pedido_id)                references pedidos (tenant_id, id),
   foreign key (tenant_id, comprobante_modificado_id) references comprobantes (tenant_id, id),
   check (tipo <> '04' or (comprobante_modificado_id is not null and motivo_modificacion is not null)),
+  -- Identidad del comprobante: lo que se cobra es la base (items + envio) mas el IVA mas la propina.
+  check (importe_total = subtotal_sin_impuestos + total_iva + propina),
   check (estado_sri <> 'autorizado' or (numero_autorizacion is not null and fecha_autorizacion is not null))
 );
 create index ix_comprobantes_pedido on comprobantes (tenant_id, pedido_id);

@@ -1,5 +1,5 @@
 -- =============================================================================
--- tests_schema_v2.sql - pruebas del esquema (101 comprobaciones)
+-- tests_schema_v2.sql - pruebas del esquema (108 comprobaciones)
 --
 -- EJECUTAR SOLO SOBRE UNA BASE RECIEN CREADA con schema_restaurantes_v2.sql (por ejemplo:
 -- "docker compose down -v && docker compose up -d" en appRestaurante/backend). NO es repetible: usa RUC, correos
@@ -144,6 +144,8 @@ select id as factura_id from comprobantes where tipo = '01' limit 1 \gset
 select t_run('una nota de credito vinculada a su factura', format($f$insert into comprobantes(tenant_id,sucursal_id,pedido_id,tipo,comprobante_modificado_id,motivo_modificacion,ambiente,secuencial,clave_acceso,fecha_emision,receptor_tipo_identificacion,receptor_identificacion,receptor_razon_social,subtotal_sin_impuestos,total_iva,importe_total) values (%L,%L,%L,'04',%L,'Devolucion total','pruebas','000000001','%s',current_date,'07','9999999999999','CF',10,1.5,11.5)$f$, :'ta', :'suc_a', :'ped', :'factura_id', repeat('3',49)));
 select t_err('una factura no admite dos notas de credito vigentes', format($f$insert into comprobantes(tenant_id,sucursal_id,pedido_id,tipo,comprobante_modificado_id,motivo_modificacion,ambiente,secuencial,clave_acceso,fecha_emision,receptor_tipo_identificacion,receptor_identificacion,receptor_razon_social,subtotal_sin_impuestos,total_iva,importe_total) values (%L,%L,%L,'04',%L,'Otra','pruebas','000000002','%s',current_date,'07','9999999999999','CF',10,1.5,11.5)$f$, :'ta', :'suc_a', :'ped', :'factura_id', repeat('4',49)), 'duplicate');
 select t_err('autorizado sin numero de autorizacion', format($f$update comprobantes set estado_sri='autorizado' where tenant_id=%L$f$, :'ta'), 'check');
+select t_err('importe_total debe cuadrar con base + IVA + propina', format($f$update comprobantes set propina = 1 where tenant_id = %L and tipo = '01'$f$, :'ta'), 'check');
+select t_run('importe_total con propina cuadra', format($f$update comprobantes set propina = 1, importe_total = 12.5 where tenant_id = %L and tipo = '01'$f$, :'ta'));
 
 \echo === 8. Sync idempotente ===
 select uuid_v7() as disp \gset

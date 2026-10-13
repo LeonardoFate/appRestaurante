@@ -20,6 +20,7 @@ public record PedidoVista(
         CanalPedido canal,
         String estado,
         EstadoPago estadoPago,
+        String momentoPago,
         Totales totales,
         List<Linea> lineas,
         boolean creadoAhora) {
@@ -34,6 +35,6 @@ public record PedidoVista(
     }
 
     public PedidoVista comoRepeticion() {
-        return new PedidoVista(id, sucursalId, numero, canal, estado, estadoPago, totales, lineas, false);
+        return new PedidoVista(id, sucursalId, numero, canal, estado, estadoPago, momentoPago, totales, lineas, false);
     }
 }

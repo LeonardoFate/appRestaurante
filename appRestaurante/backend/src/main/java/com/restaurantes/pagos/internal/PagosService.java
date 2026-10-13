@@ -1,5 +1,6 @@
 package com.restaurantes.pagos.internal;
 
+import com.restaurantes.pagos.api.PagosApi;
 import com.restaurantes.pagos.domain.MetodoPago;
 import com.restaurantes.pagos.domain.PoliticaDeCobro;
 import com.restaurantes.pedidos.api.PedidoVista;
@@ -20,7 +21,7 @@ import java.util.UUID;
  * Casos de uso de pagos. Se ejecutan dentro de la unidad de trabajo del tenant que abre el endpoint REST.
  */
 @ApplicationScoped
-class PagosService {
+class PagosService implements PagosApi {
 
     @Inject
     PagoRepository repo;
@@ -81,6 +82,18 @@ class PagosService {
         }
         return new ResultadoPago(id, pedidoId, monto, nuevoEstado,
                 PoliticaDeCobro.saldo(pedido.totales().total(), cobradoTotal), true);
+    }
+
+    @Override
+    public BigDecimal cobrarSaldoEnEfectivo(UUID pedidoId) {
+        PedidoVista pedido = pedidos.buscarBloqueando(pedidoId)
+                .orElseThrow(() -> ReglaDeNegocioException.noEncontrado("PEDIDO_NO_ENCONTRADO", "El pedido no existe"));
+        BigDecimal saldo = PoliticaDeCobro.saldo(pedido.totales().total(), repo.sumaCobrada(pedidoId));
+        if (saldo.signum() <= 0) {
+            return BigDecimal.ZERO.setScale(2);
+        }
+        registrar(UuidV7.next(), pedidoId, MetodoPago.EFECTIVO, saldo);
+        return saldo;
     }
 
     /** Repetir el mismo pago devuelve el resultado original; reutilizar el id con otros datos es un conflicto. */

@@ -72,17 +72,21 @@ class PedidosService implements PedidosApi {
             return existente.get().comoRepeticion();
         }
 
-        List<LineaPedido> lineas = construirLineas(sucursalId, orden);
-        Totales totales = CalculadoraTotales.calcular(lineas, orden.propina());
+        List<LineaPedido> lineas = construirLineas(sucursalId, orden.lineas());
+        Totales totales = CalculadoraTotales.calcular(lineas, orden.propina(), orden.envio() == null ? null : orden.envio().costoEnvio());
+        if (orden.envio() != null && totales.subtotal().compareTo(orden.envio().pedidoMinimo()) < 0) {
+            throw ReglaDeNegocioException.conflicto("PEDIDO_MINIMO_NO_ALCANZADO",
+                    "El pedido minimo de la zona es " + orden.envio().pedidoMinimo().toPlainString());
+        }
         LocalDate fechaOperativa = LocalDate.now(ZoneId.of(zonaHoraria));
         int numero = repo.siguienteNumero(sucursalId, fechaOperativa);
 
         repo.insertar(pedidoId, sucursalId, numero, orden.canal(), orden.mesaId(), caller.usuarioId(),
-                fechaOperativa, totales, lineas);
+                fechaOperativa, totales, lineas, orden.envio());
 
         PedidoVista vista = repo.buscar(pedidoId, false).orElseThrow();
         return new PedidoVista(vista.id(), vista.sucursalId(), vista.numero(), vista.canal(), vista.estado(),
-                vista.estadoPago(), vista.totales(), vista.lineas(), true);
+                vista.estadoPago(), vista.momentoPago(), vista.totales(), vista.lineas(), true);
     }
 
     @Override
@@ -130,6 +134,66 @@ class PedidosService implements PedidosApi {
             return;
         }
         repo.cambiarEstado(pedidoId, estado, destino, usuarioId, motivo.trim(), origenDe(usuarioId));
+    }
+
+    // ------------------------------------------------------------ agregar items
+
+    @Override
+    public PedidoVista agregarItems(UUID pedidoId, List<NuevoPedido.NuevaLinea> nuevas, UUID usuarioId) {
+        if (nuevas == null || nuevas.isEmpty()) {
+            throw ReglaDeNegocioException.invalido("PEDIDO_SIN_ITEMS", "Indique al menos un item para agregar");
+        }
+        PedidoVista pedido = bloquear(pedidoId);
+
+        // Idempotencia por id de item: repetir la misma peticion no duplica nada; mezclar ids ya usados con nuevos, o
+        // usar el id de un item de OTRO pedido, es un conflicto.
+        List<UUID> conId = nuevas.stream().map(NuevoPedido.NuevaLinea::id).filter(java.util.Objects::nonNull).toList();
+        if (conId.stream().distinct().count() != conId.size()) {
+            throw ReglaDeNegocioException.invalido("ITEM_ID_DUPLICADO", "Hay ids de item repetidos en la peticion");
+        }
+        Map<UUID, UUID> usados = repo.pedidoDeCadaItem(conId);
+        if (!usados.isEmpty()) {
+            boolean todosSonDeEstePedido = usados.values().stream().allMatch(pedidoId::equals);
+            if (todosSonDeEstePedido && usados.size() == nuevas.size()) {
+                return pedido.comoRepeticion();
+            }
+            throw ReglaDeNegocioException.conflicto("ITEM_ID_REUTILIZADO", "Alguno de los ids de item ya se uso");
+        }
+
+        EstadoPedido estado = EstadoPedido.desde(pedido.estado());
+        if (!admiteItems(estado)) {
+            throw ReglaDeNegocioException.conflicto("PEDIDO_NO_ADMITE_ITEMS",
+                    "Un pedido '" + estado.valor() + "' ya no admite items: cree un pedido nuevo");
+        }
+        // Un pedido pagado ya se facturo con sus items: agregar uno dejaria la factura incompleta.
+        if (pedido.estadoPago() == EstadoPago.PAGADO) {
+            throw ReglaDeNegocioException.conflicto("PEDIDO_YA_PAGADO", "El pedido ya esta pagado: cree un pedido nuevo");
+        }
+        if (pedido.estadoPago() == EstadoPago.REEMBOLSADO || pedido.estadoPago() == EstadoPago.REEMBOLSADO_PARCIAL) {
+            throw ReglaDeNegocioException.conflicto("PEDIDO_REEMBOLSADO", "El pedido tiene reembolsos: cree un pedido nuevo");
+        }
+
+        List<LineaPedido> lineas = construirLineas(pedido.sucursalId(), nuevas);
+        repo.agregarItems(pedidoId, lineas);
+        Totales totales = CalculadoraTotales.calcular(repo.lineasVigentes(pedidoId), pedido.totales().propina(),
+                pedido.totales().costoEnvio());
+        repo.actualizarTotales(pedidoId, totales);
+
+        // Si cocina ya recibio el pedido, los items nuevos tambien deben llegar (si no, se envian al confirmar).
+        if (estado != EstadoPedido.CREADO && estado != EstadoPedido.PAGO_PENDIENTE) {
+            outbox.emitir("ItemsAgregados", "pedido", pedidoId, Map.of(
+                    "pedidoId", pedidoId.toString(),
+                    "itemIds", lineas.stream().map(l -> l.id().toString()).toList()));
+        }
+        PedidoVista vista = repo.buscar(pedidoId, false).orElseThrow();
+        return new PedidoVista(vista.id(), vista.sucursalId(), vista.numero(), vista.canal(), vista.estado(),
+                vista.estadoPago(), vista.momentoPago(), vista.totales(), vista.lineas(), true);
+    }
+
+    /** Antes de que el pedido este listo: el estado nunca retrocede, asi que despues ya no se le agregan items. */
+    private static boolean admiteItems(EstadoPedido estado) {
+        return estado == EstadoPedido.CREADO || estado == EstadoPedido.PAGO_PENDIENTE
+                || estado == EstadoPedido.CONFIRMADO || estado == EstadoPedido.EN_PREPARACION;
     }
 
     // -------------------------------------------------------------- confirmar
@@ -206,7 +270,7 @@ class PedidosService implements PedidosApi {
         }
 
         // Los totales siguen a los items vigentes (anular un item baja el total). La propina se conserva.
-        Totales recalculados = CalculadoraTotales.calcular(vigentes, pedido.totales().propina());
+        Totales recalculados = CalculadoraTotales.calcular(vigentes, pedido.totales().propina(), pedido.totales().costoEnvio());
         if (!recalculados.equals(pedido.totales())) {
             repo.actualizarTotales(pedidoId, recalculados);
         }
@@ -230,6 +294,29 @@ class PedidosService implements PedidosApi {
             }
         }
         cerrarSiCorresponde(pedido, actual, pedido.estadoPago(), usuarioId);
+    }
+
+    // ----------------------------------------------------------- reparto (delivery)
+
+    @Override
+    public PedidoVista avanzarEntrega(UUID pedidoId, EstadoPedido destino, UUID usuarioId) {
+        if (destino != EstadoPedido.ASIGNADO && destino != EstadoPedido.EN_CAMINO && destino != EstadoPedido.ENTREGADO) {
+            throw ReglaDeNegocioException.invalido("DESTINO_INVALIDO", "El reparto solo mueve a asignado, en_camino o entregado");
+        }
+        PedidoVista pedido = bloquear(pedidoId);
+        if (pedido.canal() != CanalPedido.DELIVERY_PROPIO) {
+            throw ReglaDeNegocioException.invalido("NO_ES_DELIVERY", "Solo un pedido de delivery tiene reparto");
+        }
+        EstadoPedido estado = EstadoPedido.desde(pedido.estado());
+        if (estado == destino) {
+            return pedido;   // idempotente
+        }
+        exigirTransicion(pedido.canal(), estado, destino);
+        repo.cambiarEstado(pedidoId, estado, destino, usuarioId, null, origenDe(usuarioId));
+        if (destino == EstadoPedido.ENTREGADO) {
+            cerrarSiCorresponde(pedido, destino, pedido.estadoPago(), usuarioId);
+        }
+        return repo.buscar(pedidoId, false).orElseThrow();
     }
 
     // ---------------------------------------------------------------- helpers
@@ -260,8 +347,11 @@ class PedidosService implements PedidosApi {
         if (orden == null || orden.canal() == null) {
             throw ReglaDeNegocioException.invalido("CANAL_REQUERIDO", "El canal del pedido es obligatorio");
         }
-        if (orden.canal() == CanalPedido.DELIVERY_PROPIO) {
-            throw ReglaDeNegocioException.invalido("CANAL_NO_SOPORTADO", "El canal delivery aun no esta disponible");
+        if (orden.canal() == CanalPedido.DELIVERY_PROPIO && orden.envio() == null) {
+            throw ReglaDeNegocioException.invalido("CANAL_NO_SOPORTADO", "Los pedidos de delivery se crean en /api/v1/delivery/pedidos");
+        }
+        if (orden.canal() != CanalPedido.DELIVERY_PROPIO && orden.envio() != null) {
+            throw ReglaDeNegocioException.invalido("ENVIO_NO_APLICA", "Solo un pedido de delivery lleva datos de envio");
         }
         if (orden.canal() == CanalPedido.SALON && orden.mesaId() == null) {
             throw ReglaDeNegocioException.invalido("MESA_REQUERIDA", "Un pedido de salon requiere mesa");
@@ -271,12 +361,12 @@ class PedidosService implements PedidosApi {
         }
     }
 
-    private List<LineaPedido> construirLineas(UUID sucursalId, NuevoPedido orden) {
-        List<UUID> ids = orden.lineas().stream().map(NuevoPedido.NuevaLinea::productoId).distinct().toList();
+    private List<LineaPedido> construirLineas(UUID sucursalId, List<NuevoPedido.NuevaLinea> pedidas) {
+        List<UUID> ids = pedidas.stream().map(NuevoPedido.NuevaLinea::productoId).distinct().toList();
         Map<UUID, ProductoVenta> productos = catalogo.buscar(sucursalId, ids);
 
         List<LineaPedido> lineas = new ArrayList<>();
-        for (NuevoPedido.NuevaLinea nueva : orden.lineas()) {
+        for (NuevoPedido.NuevaLinea nueva : pedidas) {
             ProductoVenta p = productos.get(nueva.productoId());
             if (p == null) {
                 throw ReglaDeNegocioException.invalido("PRODUCTO_NO_ENCONTRADO", "Un producto del pedido no existe");

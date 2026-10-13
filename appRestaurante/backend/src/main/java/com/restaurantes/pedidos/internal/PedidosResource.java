@@ -66,6 +66,18 @@ public class PedidosResource {
         return PedidoResponse.de(tx.withTenant(caller.tenantId(), c -> pedidos.confirmar(id, usuario)));
     }
 
+    /**
+     * Agrega items a un pedido que aun no esta listo ni pagado por completo. 201 si los agrega; 200 si es la repeticion
+     * idempotente de una peticion ya aplicada. Si cocina ya tenia el pedido, los items nuevos le llegan por evento.
+     */
+    @POST
+    @Path("/{id}/items")
+    public Response agregarItems(@PathParam("id") UUID id, @NotNull @Valid AgregarItemsRequest request) {
+        UUID usuario = caller.usuarioId();
+        PedidoVista vista = tx.withTenant(caller.tenantId(), c -> pedidos.agregarItems(id, request.lineas(), usuario));
+        return Response.status(vista.creadoAhora() ? 201 : 200).entity(PedidoResponse.de(vista)).build();
+    }
+
     /** Cancela el pedido con un motivo. Solo antes de entregar y sin cobros. Requiere permiso de caja o administracion. */
     @POST
     @Path("/{id}/cancelar")

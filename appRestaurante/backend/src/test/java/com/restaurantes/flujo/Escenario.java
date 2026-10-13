@@ -46,11 +46,38 @@ public class Escenario {
                 tenantId, usuarioId, sucursalId, rol);
     }
 
+    /** Crea un usuario con membresia activa de {@code repartidor} en todas las sucursales y devuelve su id. */
+    public UUID crearRepartidor(Restaurante r) {
+        UUID usuario = crearUsuario(r, "repartidor-" + UuidV7.next() + "@prueba.com", "clave-larga-123");
+        darMembresia(r.tenantId(), usuario, null, "repartidor");
+        return usuario;
+    }
+
+    /** JWT de OTRO usuario del mismo restaurante (por ejemplo un repartidor) en la sucursal del restaurante. */
+    public String tokenDe(Restaurante r, UUID usuarioId, String... roles) {
+        return Jwt.issuer("restaurantes")
+                .subject(usuarioId.toString())
+                .groups(Set.of(roles))
+                .claim("tenant_id", r.tenantId().toString())
+                .claim("sucursal_id", r.sucursalId().toString())
+                .expiresIn(Duration.ofMinutes(5))
+                .sign();
+    }
+
     /** Crea otra sucursal del mismo restaurante y devuelve su id. */
     public UUID crearSucursal(UUID tenantId, String codigoEstablecimiento) {
         UUID id = UuidV7.next();
         ejecutar(tenantId, "insert into sucursales(id, tenant_id, nombre, cod_establecimiento, cod_punto_emision, direccion) "
                 + "values (?, ?, 'Otra', ?, '001', 'Calle 2')", id, tenantId, codigoEstablecimiento);
+        return id;
+    }
+
+    /** Crea una zona de delivery activa (poligono vacio: aun no se evalua) y devuelve su id. */
+    public UUID crearZona(UUID tenantId, UUID sucursalId, String nombre, String costoEnvio, String pedidoMinimo) {
+        UUID id = UuidV7.next();
+        ejecutar(tenantId, "insert into zonas_delivery(id, tenant_id, sucursal_id, nombre, poligono, costo_envio, pedido_minimo) "
+                + "values (?, ?, ?, ?, '{}'::jsonb, ?, ?)", id, tenantId, sucursalId, nombre,
+                new BigDecimal(costoEnvio), new BigDecimal(pedidoMinimo));
         return id;
     }
 

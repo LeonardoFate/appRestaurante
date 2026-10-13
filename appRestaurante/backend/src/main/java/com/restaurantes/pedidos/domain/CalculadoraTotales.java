@@ -18,6 +18,11 @@ public final class CalculadoraTotales {
     }
 
     public static Totales calcular(List<LineaPedido> lineas, BigDecimal propina) {
+        return calcular(lineas, propina, null);
+    }
+
+    /** Igual, con costo de envio (delivery). El envio no lleva IVA en este modelo (supuesto fiscal sin verificar). */
+    public static Totales calcular(List<LineaPedido> lineas, BigDecimal propina, BigDecimal costoEnvio) {
         if (lineas == null || lineas.isEmpty()) {
             throw ReglaDeNegocioException.invalido("PEDIDO_SIN_ITEMS", "El pedido debe tener al menos un item");
         }
@@ -36,7 +41,10 @@ public final class CalculadoraTotales {
             iva = iva.add(linea.iva());
         }
         BigDecimal descuento = CERO;
-        BigDecimal envio = CERO;
+        BigDecimal envio = costoEnvio == null ? CERO : costoEnvio.setScale(2, RoundingMode.HALF_UP);
+        if (envio.signum() < 0) {
+            throw ReglaDeNegocioException.invalido("ENVIO_NEGATIVO", "El costo de envio no puede ser negativo");
+        }
         BigDecimal total = subtotal.subtract(descuento).add(iva).add(propinaFinal).add(envio);
         return new Totales(subtotal, descuento, iva, propinaFinal, envio, total);
     }

@@ -316,6 +316,19 @@ class ReembolsosFlujoTest {
     }
 
     @Test
+    void elTopeDelReembolsoDescuentaLoYaReembolsadoConCodigoDeNegocio() {
+        Restaurante r = escenario.crearRestaurante("10.00");
+        UUID pedidoId = pedidoConfirmado(r);
+        UUID pagoId = pagar(r, pedidoId, "11.50");
+        assertEquals(201, reembolsar(r, "admin", pagoId, "4.00", "x").statusCode());
+
+        // Quedan 7.50: 7.51 se rechaza con el codigo de negocio (no con el error crudo del trigger de la base).
+        assertCodigo(409, "MONTO_EXCEDE_REEMBOLSABLE", reembolsar(r, "admin", pagoId, "7.51", "x"));
+        assertEquals(201, reembolsar(r, "admin", pagoId, "7.50", "x").statusCode(), "exactamente lo que queda");
+        assertCodigo(409, "PAGO_NO_REEMBOLSABLE", reembolsar(r, "admin", pagoId, "0.01", "x"));
+    }
+
+    @Test
     void soloOwnerYAdminReembolsan() {
         Restaurante r = escenario.crearRestaurante("10.00");
         UUID pedidoId = pedidoConfirmado(r);
